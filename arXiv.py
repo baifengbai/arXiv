@@ -1,10 +1,78 @@
 
-from bs4 import BeautifulSoup as BS
+import os
+from os.path import join, realpath, dirname
+import pandas as pd
+import numpy as np
 import requests
 import shlex
 import textwrap
 import string
 from datetime import date, timedelta
+import nltk.data
+from nltk.corpus import stopwords
+
+
+def main():
+    '''
+    Query newly added articles to selected arXiv categories, rank them
+    according to given keywords, and print out the ranked list.
+
+    This method ranks articles from 0 to 4, extract the unique words in them,
+    and stores the result in a csv file.
+
+    Not very good, if a word is present in more than one rank it will tend
+    to cancel itself out when obtaining the probability.
+    '''
+
+    mypath = realpath(join(os.getcwd(), dirname(__file__), 'input'))
+    nltk.data.path.append(mypath)
+
+    # Read accepted/rejected keywords and categories from file.
+    mode, date_range, in_k, ou_k, categs = get_in_out()
+
+    wordsRank = readWords()
+
+    dates_no_wknds = ['']
+    if mode == 'range':
+        start_date, end_date, dates_no_wknds = dateRange(date_range)
+        print("\nDownloading arXiv data for range {} / {}".format(
+            start_date, end_date))
+    elif mode == 'recent':
+        print("\nDownloading recent arXiv data.")
+    else:
+        raise ValueError("Unknown mode '{}'".format(mode))
+
+    print("Categories selected: {}".format(', '.join(categs)))
+    # articles = []
+    # for day_week in dates_no_wknds:
+    #     # Get new data from all the selected categories.
+    #     for cat_indx, categ in enumerate(categs):
+
+    #         # Get data from each category.
+    #         soup = get_arxiv_data(categ, day_week)
+
+    #         # Store titles, links, authors and abstracts into list.
+    #         articles = articles + get_articles(soup)
+
+    import pickle
+    # with open('filename.pickle', 'wb') as f:
+    #     pickle.dump(articles, f)
+    with open('filename.pickle', 'rb') as f:
+        articles = pickle.load(f)
+
+    # Clean title and abstract.
+    clTitle, clAbs = cleanText(articles)
+
+    # Obtain articles' probabilities according to keywords.
+    K_prob = get_Kprob(clTitle, clAbs, wordsRank)
+    # Sort articles.
+    articles, K_prob = sort_rev(articles, K_prob)
+
+    newRank = manualRank(articles, K_prob, clTitle, clAbs)
+
+    updtRank(wordsRank, newRank)
+
+    print("\nFinished.")
 
 
 def get_in_out():
@@ -36,6 +104,14 @@ def get_in_out():
                         ou_k.append(i)
 
     return mode, [start_date, end_date], in_k, ou_k, categs
+
+
+def readWords():
+    """
+    Read ranked words from input file.
+    """
+    wordsRank = pd.read_csv("input/wordsRank.dat")
+    return wordsRank
 
 
 def dateRange(date_range):
@@ -99,48 +175,62 @@ def get_articles(soup):
     return articles
 
 
-def cleanText(text):
-    """
-    Remove punctuation and change to lowercase.
-    """
-    translator = str.maketrans('', '', string.punctuation)
-    clean = str(text).lower().translate(translator)
-
-    return clean
-
-
-def keywProbability(N_in, N_out):
+def cleanText(articles):
     """
     """
-    if (N_in + N_out) > 0:
-        K_p = max(0., (2. * N_in - N_out))
-    else:
-        K_p = -1.
+    stpwrds = stopwords.words("english") +\
+        ['find', 'data', 'observed', 'using', 'show', 'showed', 'well',
+         'around', 'used', 'thus', 'within', 'investigate', 'also',
+         'recently', 'however', 'even', 'institute', 'taken']
 
-    return K_p
+    clean_text = [[], []]
+    for art in articles:
+        title, abstr = art[1], art[2]
+        for i, text in enumerate((title, abstr)):
+            # Remove punctuation.
+            translator = str.maketrans('', '', string.punctuation)
+            # To lowercase.
+            text = str(text).lower().translate(translator).split()
+            # Remove stopwords and some common words.
+            clean_text[i].append([w for w in text if w not in stpwrds])
+
+    return clean_text
 
 
-def get_Kprob(articles, in_k, ou_k):
+def get_Kprob(clTitle, clAbs, wordsRank):
     '''
     Obtains keyword base probabilities for each article, according to the
     in/out keywords.
     '''
     art_K_prob = []
     # Loop through each article stored.
-    for i, art in enumerate(articles):
-        N_in, N_out = 0., 0.
-        # Search for rejected words.
-        for ou_keyw in ou_k:
-            # Search titles, abstract and authors list.
-            for strng in art[:3]:
-                N_out = N_out + cleanText(strng).count(ou_keyw.lower())
-        # Search for accepted keywords.
-        for in_keyw in in_k:
-            # Search titles, abstract and authors list.
-            for strng in art[:3]:
-                N_in = N_in + cleanText(strng).count(in_keyw.lower())
+    for i, title in enumerate(clTitle):
 
-        art_K_prob.append(keywProbability(N_in, N_out))
+        K_prob = 0.
+        for w in title:
+            if w in wordsRank['0rank']:
+                K_prob += 0. * w
+            if w in wordsRank['1rank']:
+                K_prob += 1. * w
+            if w in wordsRank['2rank']:
+                K_prob += 2. * w
+            if w in wordsRank['3rank']:
+                K_prob += 3. * w
+            if w in wordsRank['4rank']:
+                K_prob += 4. * w
+        for w in clAbs[i]:
+            if w in wordsRank['0rank']:
+                K_prob += 0. * w
+            if w in wordsRank['1rank']:
+                K_prob += 1. * w
+            if w in wordsRank['2rank']:
+                K_prob += 2. * w
+            if w in wordsRank['3rank']:
+                K_prob += 3. * w
+            if w in wordsRank['4rank']:
+                K_prob += 4. * w
+
+        art_K_prob.append(K_prob)
 
     return art_K_prob
 
@@ -154,42 +244,10 @@ def sort_rev(articles, K_prob):
     return articles, sorted(K_prob)
 
 
-def main():
-    '''
-    Query newly added articles to selected arXiv categories, rank them
-    according to given keywords, and print out the ranked list.
-    '''
-    # Read accepted/rejected keywords and categories from file.
-    mode, date_range, in_k, ou_k, categs = get_in_out()
-
-    dates_no_wknds = ['']
-    if mode == 'range':
-        start_date, end_date, dates_no_wknds = dateRange(date_range)
-        print("\nDownloading arXiv data for range {} / {}".format(
-            start_date, end_date))
-    elif mode == 'recent':
-        print("\nDownloading recent arXiv data.")
-    else:
-        raise ValueError("Unknown mode '{}'".format(mode))
-
-    print("Categories selected: {}".format(', '.join(categs)))
-    for day_week in dates_no_wknds:
-
-        # Get new data from all the selected categories.
-        articles = []
-        for cat_indx, categ in enumerate(categs):
-
-            # Get data from each category.
-            soup = get_arxiv_data(categ, day_week)
-
-            # Store titles, links, authors and abstracts into list.
-            articles = articles + get_articles(soup)
-
-    # Obtain articles' probabilities according to keywords.
-    K_prob = get_Kprob(articles, in_k, ou_k)
-    # Sort articles.
-    articles, K_prob = sort_rev(articles, K_prob)
-
+def manualRank(articles, K_prob, clTitle, clAbs):
+    """
+    """
+    newRank = {'0rank': [], '1rank': [], '2rank': [], '3rank': [], '4rank': []}
     for i, art in enumerate(articles):
         # Title
         title = str(art[1])
@@ -202,7 +260,41 @@ def main():
         # Abstract
         print(textwrap.fill(str(art[2]), 80))
 
-    print("\nFinished.")
+        # Rank
+        while True:
+            pn = input("Rank (0 to 4): ")
+            # import random
+            # pn = random.choice(['0', '1', '2', '3', '4'])
+            if pn in ['0', '1', '2', '3', '4']:
+                pn = pn + 'rank'
+                newRank[pn] += clTitle[i] + clAbs[i]
+                break
+            elif pn in ['q', 'quit', 'quit()', 'exit']:
+                return newRank
+
+    return newRank
+
+
+def updtRank(wordsRank, newRank):
+    """
+    Update the ranked words file.
+    """
+
+    col0 = np.array(list(set(newRank['0rank'] + list(wordsRank['0rank']))))
+    col1 = np.array(list(set(newRank['1rank'] + list(wordsRank['1rank']))))
+    col2 = np.array(list(set(newRank['2rank'] + list(wordsRank['2rank']))))
+    col3 = np.array(list(set(newRank['3rank'] + list(wordsRank['3rank']))))
+    col4 = np.array(list(set(newRank['4rank'] + list(wordsRank['4rank']))))
+
+    df0 = pd.DataFrame({'0rank': col0})
+    df1 = pd.DataFrame({'1rank': col1})
+    df2 = pd.DataFrame({'2rank': col2})
+    df3 = pd.DataFrame({'3rank': col3})
+    df4 = pd.DataFrame({'4rank': col4})
+
+    df = pd.concat([df0, df1, df2, df3, df4], axis=1)
+    df.to_csv("input/wordsRank.dat", index=False)
+
 
 
 if __name__ == "__main__":
